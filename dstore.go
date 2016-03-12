@@ -22,8 +22,7 @@ func (d *SQLDatastore) Put(k ds.Key, val interface{}) error {
 		return fmt.Errorf("data was not a []byte")
 	}
 
-	//fmt.Println(pq.CopyIn("blocks", "key", "data"))
-	_, err := d.db.Exec("INSERT INTO blocks (key, data) SELECT $1, $2 WHERE NOT EXISTS ( SELECT key FROM blocks WHERE key = $1);", k.Bytes(), data)
+	_, err := d.db.Exec("INSERT INTO blocks (key, data) SELECT $1, $2 WHERE NOT EXISTS ( SELECT key FROM blocks WHERE key = $1);", k.String(), data)
 	if err != nil {
 		return err
 	}
@@ -32,7 +31,7 @@ func (d *SQLDatastore) Put(k ds.Key, val interface{}) error {
 }
 
 func (d *SQLDatastore) Get(k ds.Key) (interface{}, error) {
-	row := d.db.QueryRow("SELECT data from blocks where key=$1", k.Bytes())
+	row := d.db.QueryRow("SELECT data from blocks where key=$1", k.String())
 
 	var out []byte
 	switch err := row.Scan(&out); err {
@@ -47,7 +46,7 @@ func (d *SQLDatastore) Get(k ds.Key) (interface{}, error) {
 
 func (d *SQLDatastore) Has(k ds.Key) (bool, error) {
 	q := "SELECT key FROM blocks WHERE key = $1;"
-	row := d.db.QueryRow(q, k.Bytes())
+	row := d.db.QueryRow(q, k.String())
 	switch err := row.Scan(); err {
 	case sql.ErrNoRows:
 		return false, nil
@@ -61,7 +60,7 @@ func (d *SQLDatastore) Has(k ds.Key) (bool, error) {
 
 func (d *SQLDatastore) Delete(k ds.Key) error {
 	q := "DELETE FROM blocks WHERE key = $1;"
-	row := d.db.QueryRow(q, k.Bytes())
+	row := d.db.QueryRow(q, k.String())
 	switch err := row.Scan(); err {
 	case sql.ErrNoRows:
 		return ds.ErrNotFound
