@@ -73,34 +73,35 @@ func (d *SQLDatastore) Delete(k ds.Key) error {
 }
 
 func (d *SQLDatastore) Query(q dsq.Query) (dsq.Results, error) {
-	panic("not yet implemented")
+	rows, err := d.db.Query("SELECT key, data FROM blocks")
+	if err != nil {
+		return nil, err
+	}
+
+	resch := make(chan dsq.Result)
+	go func() {
+		defer close(resch)
+
+		for rows.Next() {
+
+			var key string
+			var out []byte
+			err := rows.Scan(&key, &out)
+			resch <- dsq.Result{
+				Error: err,
+				Entry: dsq.Entry{
+					Key:   key,
+					Value: out,
+				},
+			}
+
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	return dsq.ResultsWithChan(q, resch), nil
 }
-
-/*
-func main() {
-	db, err := sql.Open("postgres", "postgres://postgres:mysecretpassword@172.17.0.2/ipfs?sslmode=disable")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	sds := &SQLDatastore{db}
-
-	dskey := ds.NewKey("thisisatest")
-	err = sds.Put(dskey, []byte("ipfsipfsipfsipfs and stuff too like cats"))
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	val, err := sds.Get(dskey)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Println(string(val.([]byte)))
-
-	fmt.Println(sds.Get(ds.NewKey("bitches")))
-	fmt.Println(sds.Has(ds.NewKey("bitches")))
-}
-*/
 
 var _ ds.Datastore = (*SQLDatastore)(nil)
