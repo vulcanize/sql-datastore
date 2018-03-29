@@ -1,39 +1,142 @@
 package sqlds
 
 import (
-	"database/sql"
+	"errors"
 	"fmt"
+	"log"
 
-	ds "github.com/jbenet/go-datastore"
-	dsq "github.com/jbenet/go-datastore/query"
+	"database/sql"
+
+	ds "gx/ipfs/QmVG5gxteQNEMhrS8prJSmU2C9rebtFuTd3SYZ5kE3YZ5k/go-datastore"
+	dsq "gx/ipfs/QmVG5gxteQNEMhrS8prJSmU2C9rebtFuTd3SYZ5kE3YZ5k/go-datastore/query"
 )
 
-type SQLDatastore struct {
-	db *sql.DB
+type Queries interface {
+	Delete() string
+	Exists() string
+	Get() string
+	Put() string
+	Query() string
+	Prefix() string
+	Limit() string
+	Offset() string
 }
 
-func NewSqlDatastore(db *sql.DB) *SQLDatastore {
-	return &SQLDatastore{db}
+type Datastore struct {
+	db      *sql.DB
+	queries Queries
 }
 
-func (d *SQLDatastore) Put(k ds.Key, val interface{}) error {
-	data, ok := val.([]byte)
-	if !ok {
-		return fmt.Errorf("data was not a []byte")
+// NewDatastore returns a new datastore
+func NewDatastore(db *sql.DB, queries Queries) *Datastore {
+	return &Datastore{db: db, queries: queries}
+}
+
+type batch struct {
+	db      *sql.DB
+	queries Queries
+	txn     *sql.Tx
+}
+
+func (b *batch) GetTransaction() (*sql.Tx, error) {
+	if b.txn != nil {
+		return b.txn, nil
 	}
 
-	_, err := d.db.Exec("INSERT INTO blocks (key, data) SELECT $1, $2 WHERE NOT EXISTS ( SELECT key FROM blocks WHERE key = $1);", k.String(), data)
+	newTransaction, err := b.db.Begin()
 	if err != nil {
+		if newTransaction != nil {
+			newTransaction.Rollback()
+		}
+
+		return nil, err
+	}
+
+	b.txn = newTransaction
+	return newTransaction, nil
+}
+
+func (b *batch) Put(key ds.Key, val []byte) error {
+	txn, err := b.GetTransaction()
+	if err != nil {
+		b.txn.Rollback()
+		return err
+	}
+
+	_, err = txn.Exec(b.queries.Put(), key.String(), val)
+	if err != nil {
+		b.txn.Rollback()
 		return err
 	}
 
 	return nil
 }
 
-func (d *SQLDatastore) Get(k ds.Key) (interface{}, error) {
-	row := d.db.QueryRow("SELECT data from blocks where key=$1", k.String())
+func (b batch) Delete(key ds.Key) error {
+	txn, err := b.GetTransaction()
+	if err != nil {
+		b.txn.Rollback()
+	}
 
+	_, err = txn.Exec(b.queries.Delete(), key.String())
+	if err != nil {
+		b.txn.Rollback()
+		return err
+	}
+
+	return err
+}
+
+func (b *batch) Commit() error {
+	if b.txn == nil {
+		return errors.New("no transaction started, cannot commit")
+	}
+
+	var err = b.txn.Commit()
+	if err != nil {
+		b.txn.Rollback()
+		return err
+	}
+
+	return nil
+}
+
+func (d *Datastore) Batch() (ds.Batch, error) {
+	batch := &batch{
+		db:      d.db,
+		queries: d.queries,
+		txn:     nil,
+	}
+
+	return batch, nil
+}
+
+func (d *Datastore) Close() error {
+	return d.db.Close()
+}
+
+func (d *Datastore) Delete(key ds.Key) error {
+	result, err := d.db.Exec(d.queries.Delete(), key.String())
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rows == 0 {
+		return ds.ErrNotFound
+	}
+
+	return nil
+}
+
+func (d *Datastore) Get(key ds.Key) (value []byte, err error) {
+	row := d.db.QueryRow(d.queries.Get(), key.String())
 	var out []byte
+
 	switch err := row.Scan(&out); err {
 	case sql.ErrNoRows:
 		return nil, ds.ErrNotFound
@@ -44,63 +147,101 @@ func (d *SQLDatastore) Get(k ds.Key) (interface{}, error) {
 	}
 }
 
-func (d *SQLDatastore) Has(k ds.Key) (bool, error) {
-	q := "SELECT key FROM blocks WHERE key = $1;"
-	row := d.db.QueryRow(q, k.String())
-	switch err := row.Scan(); err {
-	case sql.ErrNoRows:
-		return false, nil
-	case nil:
-		return true, nil
-	default:
-		return false, err
-	}
+func (d *Datastore) Has(key ds.Key) (exists bool, err error) {
+	row := d.db.QueryRow(d.queries.Exists(), key.String())
 
+	switch err := row.Scan(&exists); err {
+	case sql.ErrNoRows:
+		return exists, nil
+	case nil:
+		return exists, nil
+	default:
+		return exists, err
+	}
 }
 
-func (d *SQLDatastore) Delete(k ds.Key) error {
-	q := "DELETE FROM blocks WHERE key = $1;"
-	row := d.db.QueryRow(q, k.String())
-	switch err := row.Scan(); err {
-	case sql.ErrNoRows:
-		return ds.ErrNotFound
-	case nil:
-		return nil
-	default:
+func (d *Datastore) Put(key ds.Key, value []byte) error {
+	_, err := d.db.Exec(d.queries.Put(), key.String(), value)
+	if err != nil {
 		return err
 	}
+
+	return nil
 }
 
-func (d *SQLDatastore) Query(q dsq.Query) (dsq.Results, error) {
-	rows, err := d.db.Query("SELECT key, data FROM blocks")
+func (d *Datastore) Query(q dsq.Query) (dsq.Results, error) {
+	raw, err := d.RawQuery(q)
 	if err != nil {
 		return nil, err
 	}
 
-	resch := make(chan dsq.Result)
-	go func() {
-		defer close(resch)
+	for _, f := range q.Filters {
+		raw = dsq.NaiveFilter(raw, f)
+	}
 
-		for rows.Next() {
+	for _, o := range q.Orders {
+		raw = dsq.NaiveOrder(raw, o)
+	}
 
-			var key string
-			var out []byte
-			err := rows.Scan(&key, &out)
-			resch <- dsq.Result{
-				Error: err,
-				Entry: dsq.Entry{
-					Key:   key,
-					Value: out,
-				},
-			}
-
-			if err != nil {
-				return
-			}
-		}
-	}()
-
-	return dsq.ResultsWithChan(q, resch), nil
+	return raw, nil
 }
 
-var _ ds.Datastore = (*SQLDatastore)(nil)
+func (d *Datastore) RawQuery(q dsq.Query) (dsq.Results, error) {
+	var rows *sql.Rows
+	var err error
+
+	if q.Prefix != "" {
+		rows, err = QueryWithParams(d, q)
+	} else {
+		rows, err = d.db.Query(d.queries.Query())
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	var entries []dsq.Entry
+	defer rows.Close()
+
+	for rows.Next() {
+		var key string
+		var out []byte
+		err := rows.Scan(&key, &out)
+
+		if err != nil {
+			log.Fatal("Error reading rows from query")
+		}
+
+		entry := dsq.Entry{
+			Key:   key,
+			Value: out,
+		}
+
+		entries = append(entries, entry)
+	}
+
+	results := dsq.ResultsWithEntries(q, entries)
+	return results, nil
+}
+
+// QueryWithParams applies prefix, limit, and offset params in pg query
+func QueryWithParams(d *Datastore, q dsq.Query) (*sql.Rows, error) {
+	var qNew = d.queries.Query()
+
+	if q.Prefix != "" {
+		qNew += fmt.Sprintf(d.queries.Prefix(), q.Prefix)
+	}
+
+	if q.Limit != 0 {
+		qNew += fmt.Sprintf(d.queries.Limit(), q.Limit)
+	}
+
+	if q.Offset != 0 {
+		qNew += fmt.Sprintf(d.queries.Offset(), q.Offset)
+	}
+
+	return d.db.Query(qNew)
+
+}
+
+var _ ds.Datastore = (*Datastore)(nil)
