@@ -1,20 +1,22 @@
-package postgres
+package sqlds
 
 import (
 	"database/sql"
 	"fmt"
-	_ "github.com/lib/pq"
-	sqlds "github.com/whyrusleeping/sql-datastore"
+
+	_ "github.com/lib/pq" //postgres driver
 )
 
-type PostgresOptions struct {
+// Options are the postgres datastore options, reexported here for convenience.
+type Options struct {
 	Host     string
 	User     string
 	Password string
 	Database string
 }
 
-func (opts *PostgresOptions) Create() (*sqlds.SQLDatastore, error) {
+// Create returns a datastore connected to postgres
+func (opts *Options) Create() (*datastore, error) {
 	opts.setDefaults()
 
 	fmtstr := "postgres://%s:%s@%s/%s?sslmode=disable"
@@ -24,10 +26,10 @@ func (opts *PostgresOptions) Create() (*sqlds.SQLDatastore, error) {
 		return nil, err
 	}
 
-	return sqlds.NewSqlDatastore(db), nil
+	return NewDatastore(db), nil
 }
 
-func (opts *PostgresOptions) setDefaults() {
+func (opts *Options) setDefaults() {
 	if opts.Host == "" {
 		opts.Host = "127.0.0.1"
 	}

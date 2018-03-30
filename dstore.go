@@ -2,36 +2,90 @@ package sqlds
 
 import (
 	"database/sql"
-	"fmt"
 
-	ds "github.com/ipfs/go-datastore"
-	dsq "github.com/ipfs/go-datastore/query"
+	"fmt"
+	ds "gx/ipfs/QmXRKBQA4wXP7xWbFiZsR1GP4HV6wMDQ1aWFxZZ4uBcPX9/go-datastore"
+	dsq "gx/ipfs/QmXRKBQA4wXP7xWbFiZsR1GP4HV6wMDQ1aWFxZZ4uBcPX9/go-datastore/query"
 )
 
-type SQLDatastore struct {
+const (
+	postgresPut    = `INSERT INTO blocks (key, data) SELECT $1, $2 WHERE NOT EXISTS ( SELECT key FROM blocks WHERE key = $1)`
+	postgresQuery  = `SELECT key, data FROM blocks`
+	postgresDelete = `DELETE FROM blocks WHERE key = $1`
+	postgresGet    = `SELECT data FROM blocks WHERE key = $1`
+	postgresExists = `SELECT exists(SELECT 1 FROM blocks WHERE key=$1)`
+)
+
+type datastore struct {
 	db *sql.DB
 }
 
-func NewSqlDatastore(db *sql.DB) *SQLDatastore {
-	return &SQLDatastore{db}
+// NewDatastore returns a new postgres datastore
+func NewDatastore(db *sql.DB) *datastore {
+	return &datastore{db}
 }
 
-func (d *SQLDatastore) Put(k ds.Key, val interface{}) error {
+type postgresBatch struct {
+	db  *sql.DB
+	txn *sql.Tx
+}
+
+func (b postgresBatch) Put(key ds.Key, val interface{}) error {
 	data, ok := val.([]byte)
 	if !ok {
-		return fmt.Errorf("data was not a []byte")
+		return ds.ErrInvalidType
 	}
+	_, err := b.txn.Exec(postgresPut, key.String(), data)
+	if err != nil {
+		b.txn.Rollback()
+	}
+	return err
+}
 
-	_, err := d.db.Exec("INSERT INTO blocks (key, data) SELECT $1, $2 WHERE NOT EXISTS ( SELECT key FROM blocks WHERE key = $1);", k.String(), data)
+func (b postgresBatch) Delete(key ds.Key) error {
+	_, err := b.txn.Exec(postgresDelete, key.String())
+	if err != nil {
+		b.txn.Rollback()
+	}
+	return err
+}
+
+func (b postgresBatch) Commit() error {
+	return b.txn.Commit()
+}
+
+func (d *datastore) Batch() (ds.Batch, error) {
+	txn, err := d.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	return &postgresBatch{
+		db:  d.db,
+		txn: txn,
+	}, nil
+}
+
+func (d *datastore) Close() error {
+	return d.db.Close()
+}
+
+func (d *datastore) Delete(key ds.Key) error {
+	result, err := d.db.Exec(postgresDelete, key.String())
 	if err != nil {
 		return err
 	}
-
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ds.ErrNotFound
+	}
 	return nil
 }
 
-func (d *SQLDatastore) Get(k ds.Key) (interface{}, error) {
-	row := d.db.QueryRow("SELECT data from blocks where key=$1", k.String())
+func (d *datastore) Get(key ds.Key) (value interface{}, err error) {
+	row := d.db.QueryRow(postgresGet, key.String())
 
 	var out []byte
 	switch err := row.Scan(&out); err {
@@ -44,35 +98,56 @@ func (d *SQLDatastore) Get(k ds.Key) (interface{}, error) {
 	}
 }
 
-func (d *SQLDatastore) Has(k ds.Key) (bool, error) {
-	q := "SELECT key FROM blocks WHERE key = $1;"
-	row := d.db.QueryRow(q, k.String())
-	switch err := row.Scan(); err {
-	case sql.ErrNoRows:
-		return false, nil
-	case nil:
-		return true, nil
-	default:
-		return false, err
-	}
+func (d *datastore) Has(key ds.Key) (exists bool, err error) {
+	row := d.db.QueryRow(postgresExists, key.String())
 
+	switch err := row.Scan(&exists); err {
+	case sql.ErrNoRows:
+		return exists, nil
+	case nil:
+		return exists, nil
+	default:
+		return exists, err
+	}
 }
 
-func (d *SQLDatastore) Delete(k ds.Key) error {
-	q := "DELETE FROM blocks WHERE key = $1;"
-	row := d.db.QueryRow(q, k.String())
-	switch err := row.Scan(); err {
-	case sql.ErrNoRows:
-		return ds.ErrNotFound
-	case nil:
-		return nil
-	default:
+func (d *datastore) Put(key ds.Key, value interface{}) error {
+	data, ok := value.([]byte)
+	if !ok {
+		return ds.ErrInvalidType
+	}
+
+	_, err := d.db.Exec(postgresPut, key.String(), data)
+	if err != nil {
 		return err
 	}
+
+	return nil
 }
 
-func (d *SQLDatastore) Query(q dsq.Query) (dsq.Results, error) {
-	rows, err := d.db.Query("SELECT key, data FROM blocks")
+func (d *datastore) Query(q dsq.Query) (dsq.Results, error) {
+	raw, err := d.RawQuery(q)
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range q.Filters {
+		raw = dsq.NaiveFilter(raw, f)
+	}
+	for _, o := range q.Orders {
+		raw = dsq.NaiveOrder(raw, o)
+	}
+	return raw, nil
+}
+
+func (d *datastore) RawQuery(q dsq.Query) (dsq.Results, error) {
+	var rows *sql.Rows
+	var err error
+	if q.Prefix != "" {
+		rows, err = QueryWithParams(d, q)
+	} else {
+		rows, err = d.db.Query(postgresQuery)
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -101,6 +176,23 @@ func (d *SQLDatastore) Query(q dsq.Query) (dsq.Results, error) {
 	}()
 
 	return dsq.ResultsWithChan(q, resch), nil
+
 }
 
-var _ ds.Datastore = (*SQLDatastore)(nil)
+// QueryWithParams applies prefix, limit, and offset params in pg query
+func QueryWithParams(d *datastore, q dsq.Query) (*sql.Rows, error) {
+	var qNew = postgresQuery
+	if q.Prefix != "" {
+		qNew += fmt.Sprintf(" WHERE key LIKE '%s%%' ORDER BY key", q.Prefix)
+	}
+	if q.Limit != 0 {
+		qNew += fmt.Sprintf(" LIMIT %d", q.Limit)
+	}
+	if q.Offset != 0 {
+		qNew += fmt.Sprintf(" OFFSET %d", q.Offset)
+	}
+	return d.db.Query(qNew)
+
+}
+
+var _ ds.Datastore = (*datastore)(nil)
