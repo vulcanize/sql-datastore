@@ -27,12 +27,11 @@ var testcases = map[string]string{
 }
 
 // returns datastore, and a function to call on exit.
-// (this garbage collects). So:
 //
 //  d, close := newDS(t)
 //  defer close()
 func newDS(t *testing.T) (*datastore, func()) {
-	path, err := ioutil.TempDir("/tmp", "testing_badger_")
+	path, err := ioutil.TempDir("/tmp", "testing_postgres_")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +120,7 @@ func TestQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	testKeyOrder(t, rs, []string{
+	expectKeyOrderMatches(t, rs, []string{
 		"/a/b",
 		"/a/b/c",
 		"/a/b/d",
@@ -135,7 +134,7 @@ func TestQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	testKeyOrder(t, rs, []string{
+	expectKeyOrderMatches(t, rs, []string{
 		"/a/d",
 		"/a/c",
 		"/a/b/d",
@@ -150,7 +149,7 @@ func TestQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	testKeyFilter(t, rs, []string{"/a/b"})
+	expectKeyFilterMatches(t, rs, []string{"/a/b"})
 
 	greaterThanFilter := dsq.FilterKeyCompare{Op: dsq.GreaterThan, Key: "/a/b"}
 	greaterThanFilters := []dsq.Filter{greaterThanFilter}
@@ -158,7 +157,7 @@ func TestQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	testKeyFilter(t, rs, []string{
+	expectKeyFilterMatches(t, rs, []string{
 		"/a/b/c",
 		"/a/b/d",
 		"/a/c",
@@ -171,7 +170,7 @@ func TestQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	testKeyFilter(t, rs, []string{
+	expectKeyFilterMatches(t, rs, []string{
 		"/a/b",
 		"/a/b/c",
 	})
@@ -274,30 +273,6 @@ func TestGetEmpty(t *testing.T) {
 	}
 }
 
-func expectMatches(t *testing.T, expect []string, actualR dsq.Results) {
-	actual, err := actualR.Rest()
-	if err != nil {
-		t.Error(err)
-	}
-
-	if len(actual) != len(expect) {
-		fmt.Println("actual: ", actual)
-		fmt.Println("expected: ", expect)
-		t.Error("not enough", expect, actual)
-	}
-	for _, k := range expect {
-		found := false
-		for _, e := range actual {
-			if e.Key == k {
-				found = true
-			}
-		}
-		if !found {
-			t.Error(k, "not found")
-		}
-	}
-}
-
 func TestBatching(t *testing.T) {
 	d, done := newDS(t)
 	defer done()
@@ -339,7 +314,6 @@ func TestBatching(t *testing.T) {
 	}
 
 	//Test delete
-
 	b, err = d.Batch()
 	if err != nil {
 		t.Fatal(err)
@@ -377,7 +351,6 @@ func TestBatching(t *testing.T) {
 }
 
 // Tests from basic_tests from go-datastore
-
 func TestBasicPutGet(t *testing.T) {
 	d, done := newDS(t)
 	defer done()
@@ -523,7 +496,29 @@ func TestManyKeysAndQuery(t *testing.T) {
 	}
 }
 
-func testKeyOrder(t *testing.T, actual dsq.Results, expect []string) {
+func expectMatches(t *testing.T, expect []string, actualR dsq.Results) {
+	actual, err := actualR.Rest()
+	if err != nil {
+		t.Error(err)
+	}
+
+	if len(actual) != len(expect) {
+		t.Error("not enough", expect, actual)
+	}
+	for _, k := range expect {
+		found := false
+		for _, e := range actual {
+			if e.Key == k {
+				found = true
+			}
+		}
+		if !found {
+			t.Error(k, "not found")
+		}
+	}
+}
+
+func expectKeyOrderMatches(t *testing.T, actual dsq.Results, expect []string) {
 	rs, err := actual.Rest()
 	if err != nil {
 		t.Error("error fetching dsq.Results", expect, actual)
@@ -544,7 +539,7 @@ func testKeyOrder(t *testing.T, actual dsq.Results, expect []string) {
 
 }
 
-func testKeyFilter(t *testing.T, actual dsq.Results, expect []string) {
+func expectKeyFilterMatches(t *testing.T, actual dsq.Results, expect []string) {
 	actualE, err := actual.Rest()
 	if err != nil {
 		t.Error(err)

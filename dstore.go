@@ -6,6 +6,7 @@ import (
 	"fmt"
 	ds "gx/ipfs/QmXRKBQA4wXP7xWbFiZsR1GP4HV6wMDQ1aWFxZZ4uBcPX9/go-datastore"
 	dsq "gx/ipfs/QmXRKBQA4wXP7xWbFiZsR1GP4HV6wMDQ1aWFxZZ4uBcPX9/go-datastore/query"
+	"log"
 )
 
 const (
@@ -99,6 +100,7 @@ func (d *datastore) Get(key ds.Key) (value interface{}, err error) {
 }
 
 func (d *datastore) Has(key ds.Key) (exists bool, err error) {
+	fmt.Println(d.db.Stats().OpenConnections)
 	row := d.db.QueryRow(postgresExists, key.String())
 
 	switch err := row.Scan(&exists); err {
@@ -152,31 +154,24 @@ func (d *datastore) RawQuery(q dsq.Query) (dsq.Results, error) {
 		return nil, err
 	}
 
-	resch := make(chan dsq.Result)
-	go func() {
-		defer close(resch)
+	var entries []dsq.Entry
+	defer rows.Close()
 
-		for rows.Next() {
-
-			var key string
-			var out []byte
-			err := rows.Scan(&key, &out)
-			resch <- dsq.Result{
-				Error: err,
-				Entry: dsq.Entry{
-					Key:   key,
-					Value: out,
-				},
-			}
-
-			if err != nil {
-				return
-			}
+	for rows.Next() {
+		var key string
+		var out []byte
+		err := rows.Scan(&key, &out)
+		if err != nil {
+			log.Fatal("Error reading rows from query")
 		}
-	}()
-
-	return dsq.ResultsWithChan(q, resch), nil
-
+		entry := dsq.Entry{
+			Key:   key,
+			Value: out,
+		}
+		entries = append(entries, entry)
+	}
+	results := dsq.ResultsWithEntries(q, entries)
+	return results, nil
 }
 
 // QueryWithParams applies prefix, limit, and offset params in pg query
