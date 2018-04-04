@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"fmt"
+	_ "github.com/lib/pq"
 	ds "gx/ipfs/QmXRKBQA4wXP7xWbFiZsR1GP4HV6wMDQ1aWFxZZ4uBcPX9/go-datastore"
 	dsq "gx/ipfs/QmXRKBQA4wXP7xWbFiZsR1GP4HV6wMDQ1aWFxZZ4uBcPX9/go-datastore/query"
 	"io/ioutil"
@@ -26,28 +27,56 @@ var testcases = map[string]string{
 	"/g":     "",
 }
 
+type fakeQueries struct{}
+
+func (fakeQueries) Delete() string {
+	return `DELETE FROM blocks WHERE key = $1`
+}
+
+func (fakeQueries) Exists() string {
+	return `SELECT exists(SELECT 1 FROM blocks WHERE key=$1)`
+}
+
+func (fakeQueries) Get() string {
+	return `SELECT data FROM blocks WHERE key = $1`
+}
+
+func (fakeQueries) Put() string {
+	return `INSERT INTO blocks (key, data) SELECT $1, $2 WHERE NOT EXISTS ( SELECT key FROM blocks WHERE key = $1)`
+}
+
+func (fakeQueries) Query() string {
+	return `SELECT key, data FROM blocks`
+}
+
+func (fakeQueries) Prefix() string {
+	return " WHERE key LIKE '%s%%' ORDER BY key"
+}
+
+func (fakeQueries) Limit() string {
+	return " LIMIT %d"
+}
+
+func (fakeQueries) Offset() string {
+	return " OFFSET %d"
+}
+
 // returns datastore, and a function to call on exit.
 //
 //  d, close := newDS(t)
 //  defer close()
-func newDS(t *testing.T) (*datastore, func()) {
+func newDS(t *testing.T) (*Datastore, func()) {
 	path, err := ioutil.TempDir("/tmp", "testing_postgres_")
 	if err != nil {
 		t.Fatal(err)
 	}
 	fmtstr := "postgres://%s:%s@%s/%s?sslmode=disable"
-	opts := Options{
-		Host:     "127.0.0.1",
-		User:     "postgres",
-		Password: "",
-		Database: "datastore",
-	}
-	constr := fmt.Sprintf(fmtstr, opts.User, opts.Password, opts.Host, opts.Database)
+	constr := fmt.Sprintf(fmtstr, "postgres", "", "127.0.0.1", "datastore")
 	db, err := sql.Open("postgres", constr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := NewDatastore(db)
+	d := NewDatastore(db, fakeQueries{})
 	d.db.Exec(`DELETE FROM blocks`)
 	return d, func() {
 		os.RemoveAll(path)
@@ -55,7 +84,7 @@ func newDS(t *testing.T) (*datastore, func()) {
 	}
 }
 
-func addTestCases(t *testing.T, d *datastore, testcases map[string]string) {
+func addTestCases(t *testing.T, d *Datastore, testcases map[string]string) {
 	for k, v := range testcases {
 		dsk := ds.NewKey(k)
 		if err := d.Put(dsk, []byte(v)); err != nil {

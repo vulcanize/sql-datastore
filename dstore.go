@@ -9,69 +9,75 @@ import (
 	"log"
 )
 
-const (
-	postgresPut    = `INSERT INTO blocks (key, data) SELECT $1, $2 WHERE NOT EXISTS ( SELECT key FROM blocks WHERE key = $1)`
-	postgresQuery  = `SELECT key, data FROM blocks`
-	postgresDelete = `DELETE FROM blocks WHERE key = $1`
-	postgresGet    = `SELECT data FROM blocks WHERE key = $1`
-	postgresExists = `SELECT exists(SELECT 1 FROM blocks WHERE key=$1)`
-)
+type Queries interface {
+	Delete() string
+	Exists() string
+	Get() string
+	Put() string
+	Query() string
+	Prefix() string
+	Limit() string
+	Offset() string
+}
 
-type datastore struct {
-	db *sql.DB
+type Datastore struct {
+	db      *sql.DB
+	queries Queries
 }
 
 // NewDatastore returns a new postgres datastore
-func NewDatastore(db *sql.DB) *datastore {
-	return &datastore{db}
+func NewDatastore(db *sql.DB, queries Queries) *Datastore {
+	return &Datastore{db: db, queries: queries}
 }
 
-type postgresBatch struct {
-	db  *sql.DB
-	txn *sql.Tx
+type batch struct {
+	db      *sql.DB
+	queries Queries
+	txn     *sql.Tx
 }
 
-func (b postgresBatch) Put(key ds.Key, val interface{}) error {
+func (b batch) Put(key ds.Key, val interface{}) error {
 	data, ok := val.([]byte)
 	if !ok {
 		return ds.ErrInvalidType
 	}
-	_, err := b.txn.Exec(postgresPut, key.String(), data)
+	_, err := b.txn.Exec(b.queries.Put(), key.String(), data)
 	if err != nil {
 		b.txn.Rollback()
 	}
 	return err
 }
 
-func (b postgresBatch) Delete(key ds.Key) error {
-	_, err := b.txn.Exec(postgresDelete, key.String())
+func (b batch) Delete(key ds.Key) error {
+	_, err := b.txn.Exec(b.queries.Delete(), key.String())
 	if err != nil {
 		b.txn.Rollback()
 	}
 	return err
 }
 
-func (b postgresBatch) Commit() error {
+func (b batch) Commit() error {
 	return b.txn.Commit()
 }
 
-func (d *datastore) Batch() (ds.Batch, error) {
+func (d *Datastore) Batch() (ds.Batch, error) {
 	txn, err := d.db.Begin()
 	if err != nil {
 		return nil, err
 	}
-	return &postgresBatch{
-		db:  d.db,
-		txn: txn,
+	return &batch{
+		db:      d.db,
+		queries: d.queries,
+		txn:     txn,
 	}, nil
 }
 
-func (d *datastore) Close() error {
+func (d *Datastore) Close() error {
 	return d.db.Close()
 }
 
-func (d *datastore) Delete(key ds.Key) error {
-	result, err := d.db.Exec(postgresDelete, key.String())
+func (d *Datastore) Delete(key ds.Key) error {
+	result, err := d.db.Exec(d.queries.Delete(), key.String())
 	if err != nil {
 		return err
 	}
@@ -85,8 +91,8 @@ func (d *datastore) Delete(key ds.Key) error {
 	return nil
 }
 
-func (d *datastore) Get(key ds.Key) (value interface{}, err error) {
-	row := d.db.QueryRow(postgresGet, key.String())
+func (d *Datastore) Get(key ds.Key) (value interface{}, err error) {
+	row := d.db.QueryRow(d.queries.Get(), key.String())
 
 	var out []byte
 	switch err := row.Scan(&out); err {
@@ -99,9 +105,8 @@ func (d *datastore) Get(key ds.Key) (value interface{}, err error) {
 	}
 }
 
-func (d *datastore) Has(key ds.Key) (exists bool, err error) {
-	fmt.Println(d.db.Stats().OpenConnections)
-	row := d.db.QueryRow(postgresExists, key.String())
+func (d *Datastore) Has(key ds.Key) (exists bool, err error) {
+	row := d.db.QueryRow(d.queries.Exists(), key.String())
 
 	switch err := row.Scan(&exists); err {
 	case sql.ErrNoRows:
@@ -113,13 +118,13 @@ func (d *datastore) Has(key ds.Key) (exists bool, err error) {
 	}
 }
 
-func (d *datastore) Put(key ds.Key, value interface{}) error {
+func (d *Datastore) Put(key ds.Key, value interface{}) error {
 	data, ok := value.([]byte)
 	if !ok {
 		return ds.ErrInvalidType
 	}
 
-	_, err := d.db.Exec(postgresPut, key.String(), data)
+	_, err := d.db.Exec(d.queries.Put(), key.String(), data)
 	if err != nil {
 		return err
 	}
@@ -127,7 +132,7 @@ func (d *datastore) Put(key ds.Key, value interface{}) error {
 	return nil
 }
 
-func (d *datastore) Query(q dsq.Query) (dsq.Results, error) {
+func (d *Datastore) Query(q dsq.Query) (dsq.Results, error) {
 	raw, err := d.RawQuery(q)
 	if err != nil {
 		return nil, err
@@ -141,13 +146,13 @@ func (d *datastore) Query(q dsq.Query) (dsq.Results, error) {
 	return raw, nil
 }
 
-func (d *datastore) RawQuery(q dsq.Query) (dsq.Results, error) {
+func (d *Datastore) RawQuery(q dsq.Query) (dsq.Results, error) {
 	var rows *sql.Rows
 	var err error
 	if q.Prefix != "" {
 		rows, err = QueryWithParams(d, q)
 	} else {
-		rows, err = d.db.Query(postgresQuery)
+		rows, err = d.db.Query(d.queries.Query())
 	}
 
 	if err != nil {
@@ -175,19 +180,19 @@ func (d *datastore) RawQuery(q dsq.Query) (dsq.Results, error) {
 }
 
 // QueryWithParams applies prefix, limit, and offset params in pg query
-func QueryWithParams(d *datastore, q dsq.Query) (*sql.Rows, error) {
-	var qNew = postgresQuery
+func QueryWithParams(d *Datastore, q dsq.Query) (*sql.Rows, error) {
+	var qNew = d.queries.Query()
 	if q.Prefix != "" {
-		qNew += fmt.Sprintf(" WHERE key LIKE '%s%%' ORDER BY key", q.Prefix)
+		qNew += fmt.Sprintf(d.queries.Prefix(), q.Prefix)
 	}
 	if q.Limit != 0 {
-		qNew += fmt.Sprintf(" LIMIT %d", q.Limit)
+		qNew += fmt.Sprintf(d.queries.Limit(), q.Limit)
 	}
 	if q.Offset != 0 {
-		qNew += fmt.Sprintf(" OFFSET %d", q.Offset)
+		qNew += fmt.Sprintf(d.queries.Offset(), q.Offset)
 	}
 	return d.db.Query(qNew)
 
 }
 
-var _ ds.Datastore = (*datastore)(nil)
+var _ ds.Datastore = (*Datastore)(nil)
