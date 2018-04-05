@@ -25,7 +25,7 @@ type Datastore struct {
 	queries Queries
 }
 
-// NewDatastore returns a new postgres datastore
+// NewDatastore returns a new datastore
 func NewDatastore(db *sql.DB, queries Queries) *Datastore {
 	return &Datastore{db: db, queries: queries}
 }

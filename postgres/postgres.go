@@ -9,50 +9,50 @@ import (
 )
 
 // Options are the postgres datastore options, reexported here for convenience.
-type PostgresOptions struct {
+type Options struct {
 	Host     string
 	User     string
 	Password string
 	Database string
 }
 
-type PostgresQueries struct {
+type Queries struct {
 }
 
-func (PostgresQueries) Delete() string {
+func (Queries) Delete() string {
 	return `DELETE FROM blocks WHERE key = $1`
 }
 
-func (PostgresQueries) Exists() string {
+func (Queries) Exists() string {
 	return `SELECT exists(SELECT 1 FROM blocks WHERE key=$1)`
 }
 
-func (PostgresQueries) Get() string {
+func (Queries) Get() string {
 	return `SELECT data FROM blocks WHERE key = $1`
 }
 
-func (PostgresQueries) Put() string {
+func (Queries) Put() string {
 	return `INSERT INTO blocks (key, data) SELECT $1, $2 WHERE NOT EXISTS ( SELECT key FROM blocks WHERE key = $1)`
 }
 
-func (PostgresQueries) Query() string {
+func (Queries) Query() string {
 	return `SELECT key, data FROM blocks`
 }
 
-func (PostgresQueries) Prefix() string {
+func (Queries) Prefix() string {
 	return " WHERE key LIKE '%s%%' ORDER BY key"
 }
 
-func (PostgresQueries) Limit() string {
+func (Queries) Limit() string {
 	return " LIMIT %d"
 }
 
-func (PostgresQueries) Offset() string {
+func (Queries) Offset() string {
 	return " OFFSET %d"
 }
 
 // Create returns a datastore connected to postgres
-func (opts *PostgresOptions) Create() (*sqlds.Datastore, error) {
+func (opts *Options) Create() (*sqlds.Datastore, error) {
 	opts.setDefaults()
 
 	fmtstr := "postgres://%s:%s@%s/%s?sslmode=disable"
@@ -61,10 +61,10 @@ func (opts *PostgresOptions) Create() (*sqlds.Datastore, error) {
 	if err != nil {
 		return nil, err
 	}
-	return sqlds.NewDatastore(db, PostgresQueries{}), nil
+	return sqlds.NewDatastore(db, Queries{}), nil
 }
 
-func (opts *PostgresOptions) setDefaults() {
+func (opts *Options) setDefaults() {
 	if opts.Host == "" {
 		opts.Host = "127.0.0.1"
 	}
