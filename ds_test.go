@@ -2,21 +2,21 @@ package sqlds
 
 import (
 	"bytes"
+	"crypto/rand"
+	"database/sql"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"sort"
 	"strings"
 	"testing"
 
-	"crypto/rand"
-	"database/sql"
-	"io/ioutil"
+	ds "github.com/ipfs/go-datastore"
+	dsq "github.com/ipfs/go-datastore/query"
 	_ "github.com/lib/pq"
-
-	ds "gx/ipfs/QmXRKBQA4wXP7xWbFiZsR1GP4HV6wMDQ1aWFxZZ4uBcPX9/go-datastore"
-	dsq "gx/ipfs/QmXRKBQA4wXP7xWbFiZsR1GP4HV6wMDQ1aWFxZZ4uBcPX9/go-datastore/query"
 )
 
+// Tests in this package require a postgres database named "test_datastore"
 var testcases = map[string]string{
 	"/a":     "a",
 	"/a/b":   "ab",
@@ -52,15 +52,19 @@ func (fakeQueries) Query() string {
 }
 
 func (fakeQueries) Prefix() string {
-	return " WHERE key LIKE '%s%%' ORDER BY key"
+	return ` WHERE key LIKE '%s%%' ORDER BY key`
 }
 
 func (fakeQueries) Limit() string {
-	return " LIMIT %d"
+	return ` LIMIT %d`
 }
 
 func (fakeQueries) Offset() string {
-	return " OFFSET %d"
+	return ` OFFSET %d`
+}
+
+func (fakeQueries) GetSize() string {
+	return `SELECT octet_length(data) FROM blocks WHERE key = $1`
 }
 
 // returns datastore, and a function to call on exit.
@@ -73,15 +77,19 @@ func newDS(t *testing.T) (*Datastore, func()) {
 		t.Fatal(err)
 	}
 	fmtstr := "postgres://%s:%s@%s/%s?sslmode=disable"
-	constr := fmt.Sprintf(fmtstr, "postgres", "", "127.0.0.1", "datastore")
+	constr := fmt.Sprintf(fmtstr, "postgres", "", "127.0.0.1", "test_datastore")
 	db, err := sql.Open("postgres", constr)
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, err = db.Exec("CREATE TABLE IF NOT EXISTS blocks (key TEXT NOT NULL UNIQUE, data BYTEA NOT NULL)")
+	if err != nil {
+		t.Fatal(err)
+	}
 	d := NewDatastore(db, fakeQueries{})
-	d.db.Exec(`DELETE FROM blocks`)
 	return d, func() {
 		os.RemoveAll(path)
+		d.db.Exec("DROP TABLE IF EXISTS blocks")
 		d.Close()
 	}
 }
@@ -108,7 +116,7 @@ func addTestCases(t *testing.T, d *Datastore, testcases map[string]string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		v2b := v2.([]byte)
+		v2b := v2
 		if string(v2b) != v {
 			t.Errorf("%s values differ: %s != %s", k, v, v2)
 		}
@@ -299,7 +307,7 @@ func TestGetEmpty(t *testing.T) {
 		t.Error(err)
 	}
 
-	if len(v.([]byte)) != 0 {
+	if len(v) != 0 {
 		t.Error("expected 0 len []byte form get")
 	}
 }
@@ -339,7 +347,7 @@ func TestBatching(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if v != string(val.([]byte)) {
+		if v != string(val) {
 			t.Fatal("got wrong data!")
 		}
 	}
@@ -381,6 +389,205 @@ func TestBatching(t *testing.T) {
 	}, rs)
 }
 
+func SubtestBasicPutGet(t *testing.T) {
+	d, done := newDS(t)
+	defer done()
+
+	k := ds.NewKey("foo")
+	val := []byte("Hello Datastore!")
+
+	err := d.Put(k, val)
+	if err != nil {
+		t.Fatal("error putting to datastore: ", err)
+	}
+
+	have, err := d.Has(k)
+	if err != nil {
+		t.Fatal("error calling has on key we just put: ", err)
+	}
+
+	if !have {
+		t.Fatal("should have key foo, has returned false")
+	}
+
+	size, err := d.GetSize(k)
+	if err != nil {
+		t.Fatal("error getting size after put: ", err)
+	}
+	if size != len(val) {
+		t.Fatalf("incorrect size: expected %d, got %d", len(val), size)
+	}
+
+	out, err := d.Get(k)
+	if err != nil {
+		t.Fatal("error getting value after put: ", err)
+	}
+
+	if !bytes.Equal(out, val) {
+		t.Fatal("value received on get wasnt what we expected:", out)
+	}
+
+	have, err = d.Has(k)
+	if err != nil {
+		t.Fatal("error calling has after get: ", err)
+	}
+
+	if !have {
+		t.Fatal("should have key foo, has returned false")
+	}
+
+	size, err = d.GetSize(k)
+	if err != nil {
+		t.Fatal("error getting size after get: ", err)
+	}
+	if size != len(val) {
+		t.Fatalf("incorrect size: expected %d, got %d", len(val), size)
+	}
+
+	err = d.Delete(k)
+	if err != nil {
+		t.Fatal("error calling delete: ", err)
+	}
+
+	have, err = d.Has(k)
+	if err != nil {
+		t.Fatal("error calling has after delete: ", err)
+	}
+
+	if have {
+		t.Fatal("should not have key foo, has returned true")
+	}
+
+	size, err = d.GetSize(k)
+	switch err {
+	case ds.ErrNotFound:
+	case nil:
+		t.Fatal("expected error getting size after delete")
+	default:
+		t.Fatal("wrong error getting size after delete: ", err)
+	}
+	if size != -1 {
+		t.Fatal("expected missing size to be -1")
+	}
+}
+
+func TestNotFounds(t *testing.T) {
+	d, done := newDS(t)
+	defer done()
+
+	badk := ds.NewKey("notreal")
+
+	val, err := d.Get(badk)
+	if err != ds.ErrNotFound {
+		t.Fatal("expected ErrNotFound for key that doesnt exist, got: ", err)
+	}
+
+	if val != nil {
+		t.Fatal("get should always return nil for not found values")
+	}
+
+	have, err := d.Has(badk)
+	if err != nil {
+		t.Fatal("error calling has on not found key: ", err)
+	}
+	if have {
+		t.Fatal("has returned true for key we don't have")
+	}
+
+	size, err := d.GetSize(badk)
+	switch err {
+	case ds.ErrNotFound:
+	case nil:
+		t.Fatal("expected error getting size after delete")
+	default:
+		t.Fatal("wrong error getting size after delete: ", err)
+	}
+	if size != -1 {
+		t.Fatal("expected missing size to be -1")
+	}
+}
+
+func SubtestManyKeysAndQuery(t *testing.T) {
+	d, done := newDS(t)
+	defer done()
+
+	var keys []ds.Key
+	var keystrs []string
+	var values [][]byte
+	count := 100
+	for i := 0; i < count; i++ {
+		s := fmt.Sprintf("%dkey%d", i, i)
+		dsk := ds.NewKey(s)
+		keystrs = append(keystrs, dsk.String())
+		keys = append(keys, dsk)
+		buf := make([]byte, 64)
+		rand.Read(buf)
+		values = append(values, buf)
+	}
+
+	t.Logf("putting %d values", count)
+	for i, k := range keys {
+		err := d.Put(k, values[i])
+		if err != nil {
+			t.Fatalf("error on put[%d]: %s", i, err)
+		}
+	}
+
+	t.Log("getting values back")
+	for i, k := range keys {
+		val, err := d.Get(k)
+		if err != nil {
+			t.Fatalf("error on get[%d]: %s", i, err)
+		}
+
+		if !bytes.Equal(val, values[i]) {
+			t.Fatal("input value didnt match the one returned from Get")
+		}
+	}
+
+	t.Log("querying values")
+	q := dsq.Query{KeysOnly: true}
+	resp, err := d.Query(q)
+	if err != nil {
+		t.Fatal("calling query: ", err)
+	}
+
+	t.Log("aggregating query results")
+	var outkeys []string
+	for {
+		res, ok := resp.NextSync()
+		if res.Error != nil {
+			t.Fatal("query result error: ", res.Error)
+		}
+		if !ok {
+			break
+		}
+
+		outkeys = append(outkeys, res.Key)
+	}
+
+	t.Log("verifying query output")
+	sort.Strings(keystrs)
+	sort.Strings(outkeys)
+
+	if len(keystrs) != len(outkeys) {
+		t.Fatal("got wrong number of keys back")
+	}
+
+	for i, s := range keystrs {
+		if outkeys[i] != s {
+			t.Fatalf("in key output, got %s but expected %s", outkeys[i], s)
+		}
+	}
+
+	t.Log("deleting all keys")
+	for _, k := range keys {
+		if err := d.Delete(k); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // Tests from basic_tests from go-datastore
 func TestBasicPutGet(t *testing.T) {
 	d, done := newDS(t)
@@ -408,13 +615,8 @@ func TestBasicPutGet(t *testing.T) {
 		t.Fatal("error getting value after put: ", err)
 	}
 
-	outb, ok := out.([]byte)
-	if !ok {
-		t.Fatalf("output type wasnt []byte, it was %T", out)
-	}
-
-	if !bytes.Equal(outb, val) {
-		t.Fatal("value received on get wasnt what we expected:", outb)
+	if !bytes.Equal(out, val) {
+		t.Fatal("value received on get wasnt what we expected:", out)
 	}
 
 	have, err = d.Has(k)
@@ -439,6 +641,7 @@ func TestBasicPutGet(t *testing.T) {
 	if have {
 		t.Fatal("should not have key foo, has returned true")
 	}
+	SubtestBasicPutGet(t)
 }
 
 func TestManyKeysAndQuery(t *testing.T) {
@@ -474,12 +677,7 @@ func TestManyKeysAndQuery(t *testing.T) {
 			t.Fatalf("error on get[%d]: %s", i, err)
 		}
 
-		valb, ok := val.([]byte)
-		if !ok {
-			t.Fatalf("expected []byte as output from get, got: %T", val)
-		}
-
-		if !bytes.Equal(valb, values[i]) {
+		if !bytes.Equal(val, values[i]) {
 			t.Fatal("input value didnt match the one returned from Get")
 		}
 	}
@@ -525,6 +723,8 @@ func TestManyKeysAndQuery(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
+	SubtestManyKeysAndQuery(t)
 }
 
 func expectMatches(t *testing.T, expect []string, actualR dsq.Results) {
@@ -567,7 +767,6 @@ func expectKeyOrderMatches(t *testing.T, actual dsq.Results, expect []string) {
 			return
 		}
 	}
-
 }
 
 func expectKeyFilterMatches(t *testing.T, actual dsq.Results, expect []string) {

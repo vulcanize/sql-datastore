@@ -1,0 +1,30 @@
+{
+  "author": "whyrusleeping",
+  "bugs": {
+    "url": "https://github.com/whyrusleeping/sql-datastore"
+  },
+  "gx": {
+    "dvcsimport": "github.com/whyrusleeping/sql-datastore"
+  },
+  "gxDependencies": [
+    {
+      "author": "magik6k",
+      "hash": "QmfJhaxwzBCorUmZNRmY87z4mD6roRrHFMqddhiS4D4XWr",
+      "name": "pq",
+      "version": "1.0.0"
+    },
+    {
+      "author": "jbenet",
+      "hash": "Qmf4xQhNomPNhrtZc67qSnfJSjxjXs9LWvknJtSXwimPrM",
+      "name": "go-datastore",
+      "version": "3.4.1"
+    }
+  ],
+  "gxVersion": "0.14.0",
+  "language": "Go",
+  "license": "",
+  "name": "sql-datastore",
+  "releaseCmd": "git commit -a -m \"gx publish $VERSION\"",
+  "version": "1.0.0"
+}
+

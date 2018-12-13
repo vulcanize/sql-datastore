@@ -1,17 +1,18 @@
 package postgres
 
 import (
+	"database/sql"
 	"fmt"
 
-	"database/sql"
-	_ "github.com/lib/pq" //postgres driver
-
 	"github.com/whyrusleeping/sql-datastore"
+
+	_ "github.com/lib/pq" //postgres driver
 )
 
 // Options are the postgres datastore options, reexported here for convenience.
 type Options struct {
 	Host     string
+	Port     string
 	User     string
 	Password string
 	Database string
@@ -37,27 +38,30 @@ func (Queries) Put() string {
 }
 
 func (Queries) Query() string {
-	return `SELECT key, data FROM blocks ORDER BY key asc`
+	return `SELECT key, data FROM blocks`
 }
 
 func (Queries) Prefix() string {
-	return " WHERE key LIKE '%s%%' ORDER BY key"
+	return ` WHERE key LIKE '%s%%' ORDER BY key`
 }
 
 func (Queries) Limit() string {
-	return " LIMIT %d"
+	return ` LIMIT %d`
 }
 
 func (Queries) Offset() string {
-	return " OFFSET %d"
+	return ` OFFSET %d`
+}
+
+func (Queries) GetSize() string {
+	return `SELECT octet_length(data) FROM blocks WHERE key = $1`
 }
 
 // Create returns a datastore connected to postgres
 func (opts *Options) Create() (*sqlds.Datastore, error) {
 	opts.setDefaults()
-
-	fmtstr := "postgres://%s:%s@%s/%s?sslmode=disable"
-	constr := fmt.Sprintf(fmtstr, opts.User, opts.Password, opts.Host, opts.Database)
+	fmtstr := "postgresql:///%s?host=%s&port=%s&user=%s&password=%s&sslmode=disable"
+	constr := fmt.Sprintf(fmtstr, opts.Database, opts.Host, opts.Port, opts.User, opts.Password)
 	db, err := sql.Open("postgres", constr)
 	if err != nil {
 		return nil, err
@@ -69,6 +73,10 @@ func (opts *Options) Create() (*sqlds.Datastore, error) {
 func (opts *Options) setDefaults() {
 	if opts.Host == "" {
 		opts.Host = "127.0.0.1"
+	}
+
+	if opts.Port == "" {
+		opts.Port = "5432"
 	}
 
 	if opts.User == "" {
